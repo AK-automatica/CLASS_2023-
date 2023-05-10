@@ -1,0 +1,613 @@
+---
+title: "Final_class_project"
+author: "JR"
+date: "4/21/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(GenomicRanges)
+library(IRanges)
+library(pheatmap)
+
+source("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/util/BCHM5631_functions.R")
+source("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/util/my_class_function.R")
+source("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/util/class_functions.R")
+source("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/util/plotting_functions.R")
+source("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/util/_setup.R")
+
+# broadpeak file path 
+broadpeakfilepath <- "/scratch/Shares/rinnclass/CLASS_2023/data/data/peaks"
+peak_list <- import_peaks(consensus_file_path = broadpeakfilepath)
+```
+
+# Your mission should you choose to accept it 
+There is an enormous amount of data in ENCODE that 
+needs to be analyzed. This includes 480 unique DBP
+ChIPseq datasets. To facilitate your mission we provide you
+1,066 peak files that have been run through the NF_CORE chipseq
+pipeline. 
+
+You will find all the .broadPeak peak files here:
+/scratch/Shares/rinnclass/CLASS_2023/data/data/peaks
+
+Use what you have learned in class to uncover
+new results from this daunting data set. 
+# Good luck the genome depends on you!
+
+
+# first you might want to think about your organization
+# 1) create a directory in your class folder for these analyses
+    # -> folder name
+          -> util/
+            -> scripts.R
+          -> analysis/
+            -> 01_consensus_peaks
+              -> .RMD
+              -> results/
+              -> figures
+            -> 02_clustering etc....
+  
+  
+# Consensus peaks + dbps 
+```{r making consensus peaks}
+#load peaks within program
+
+# Consensus peaks
+basepath <- "/scratch/Shares/rinnclass/CLASS_2023"
+peak_path <- "data/data/peaks/consensus_peaks"
+consensusPeakPath <- file.path(basepath, peak_path)
+consensus_peaks_files <- list.files(consensusPeakPath, 
+                                             pattern = "*.bed",
+                                             full.names = TRUE)
+
+consensus_peaks <- lapply(consensus_peaks_files, rtracklayer::import)
+names(consensus_peaks) <- gsub("/scratch/Shares/rinnclass/CLASS_2023/data/data/peaks/consensus_peaks/|.bed","", consensus_peaks_files)
+
+# use 01_create consensus_peaks.RMD
+# Creating unique DBP object for create_consensus_peaks_from_reduced
+dbp <- unique(sapply(names(peak_list), function(x) {
+   unlist(strsplit(x, "_"))[1]
+}))
+
+# now run our function consensus_from_reduced
+consensus_list <- lapply(dbp, consensus_from_reduced, peak_list)
+
+# adding names to the GRange list
+names(consensus_list) <- dbp
+```
+# Num_peaks_df
+```{r}
+# make a data frame for peaks 
+# Num_peaks_df
+num_peaks_df <- data.frame("dbp" = names(consensus_peaks),
+                           "num_peaks" = sapply(consensus_peaks, length))
+view(num_peaks_df)
+
+save(consensus_list, file = "results/consensus_list.RData")
+
+load("results/consensus_list.RData", verbose = T)
+```
+
+# exploring the number of peaks in the consensus_list
+```{r}
+
+# creating list of num_peaks per dbp
+num_peaks <- sapply(consensus_list, length)
+
+# plotting - visualize peaks for potential filtering
+hist(num_peaks, breaks = 1000)
+hist(num_peaks, breaks = 1000, xlim = c(0,3000))
+ggsave("figures/hist_num_peaks.pdf")
+#Result: seems like 1000 peaks should be the min moving forward.
+```
+
+
+# filtering consensus_list to dbps with > 1000 peaks
+```{r filtered_consenus_list}
+
+# Filter out any chip data less 1,000 peaks == filtered consensus peaks
+filtered_consensus_list <- consensus_list[sapply(consensus_list, length) > 1000]
+
+# saving 
+save(filtered_consensus_list, file = "results/filtered_consensus_list.RData")
+
+# keeping track of DBPs lost
+lost_dbps <- names(consensus_list[sapply(consensus_list, length) < 1000]) %>% as.data.frame()
+
+# saving 
+write.table(lost_dbps, "results/lost_dbps.csv")
+
+```
+
+# exporting filtered_consensus_peaks
+```{r exporting filtered consensus peaks}
+# Do not re-run once set
+# this will take 25 min to run
+for(i in 1:length(filtered_consensus_list)) {
+  rtracklayer::export(filtered_consensus_list[[i]], 
+                      paste0("results/filtered_consensus_peaks/", 
+                             names(filtered_consensus_list)[i], 
+                             "_filtered_consensus_peaks.bed"))
+}
+
+# will rename peaks later for easier data access
+
+```
+
+# loading in genome features
+# lncRNA and or mRNA promoters / gene annotations
+```{r}
+# load in gencode_gr 
+# this is the database for gencode of all the human genome
+# this will take 5 min to load 
+gencode_gr <- rtracklayer::import("/scratch/Shares/rinnclass/CLASS_2023/data/data/genomes/gencode.v32.annotation.gtf")
+
+# gencode genes
+gencode_genes <- gencode_gr[gencode_gr$type == "gene"] 
+
+# mrna_genes
+mrna_genes <- gencode_genes[gencode_genes$gene_type %in% "protein_coding"]
+
+# lncrna_genes
+lncrna_genes <- gencode_genes[gencode_genes$gene_type %in% "lncRNA"] 
+
+# mrna_lncrna_genes
+mrna_lncrna_genes <- gencode_genes[gencode_genes$gene_type %in% c("protein_coding","lncRNA")]
+
+# lncrna_mrna_promoters
+lncrna_mrna_promoters <- promoters(mrna_lncrna_genes, upstream = 1000, downstream = 1000)
+
+# lncrna_gene_ids
+lncrna_gene_ids <- mrna_lncrna_genes$gene_id[mrna_lncrna_genes$gene_type == "lncRNA"]
+
+# mrna_gene_ids
+mrna_gene_ids <-mrna_lncrna_genes$gene_id[mrna_lncrna_genes$gene_type == "protein_coding"]
+
+```
+
+# lets make num_peaks_df
+```{r}
+# making data frame of filtered_consensus_peak info
+num_peaks_df <- data.frame("dbp" = names(filtered_consensus_list),
+                           "num_peaks" = sapply(filtered_consensus_list, length))
+
+# total genome covered by peaks
+num_peaks_df$total_peak_length <- sapply(filtered_consensus_list, function(x) sum(width(x)))
+
+# creating number of promoter overlaps entry
+promoter_peak_counts <- count_peaks_per_feature(lncrna_mrna_promoters, filtered_consensus_list, type = "counts")
+
+# creating promoter peak_occurence for clustering - Metaplots later.
+promoter_peak_matrix <- count_peaks_per_feature(lncrna_mrna_promoters, filtered_consensus_list, type = "occurrence")
+
+# saving promoter_peak_matrix
+write.table(promoter_peak_matrix, "results/promoter_peak_occurrence_matrix.tsv")
+
+# read back in
+promoter_peak_occurrence_matrix <- read.table("results/promoter_peak_occurrence_matrix.tsv")
+
+# summing rows to get total number of promoter overlaps
+num_peaks_df$peaks_overlapping_promoters <- rowSums(promoter_peak_counts)
+
+# lncrna promoter overlaps 
+num_peaks_df$peaks_overlapping_lncrna_promoters <- rowSums(promoter_peak_counts[,lncrna_gene_ids])
+
+# mrna promoter overlaps
+num_peaks_df$peaks_overlapping_mrna_promoters <- rowSums(promoter_peak_counts[,mrna_gene_ids])
+
+# Finding overlaps with gene_bodies (will take a few minutes again)
+# Note this takes several minutes
+genebody_peak_counts <- count_peaks_per_feature(mrna_lncrna_genes, 
+                                                filtered_consensus_list, 
+                                                type = "counts")
+
+# All gene bodies overlaps
+num_peaks_df$peaks_overlapping_genebody <- rowSums(genebody_peak_counts)
+
+# lncRNA gene bodies 
+num_peaks_df$peaks_overlapping_lncrna_genebody <- rowSums(genebody_peak_counts[,lncrna_gene_ids])
+
+# mRNA gene bodies
+num_peaks_df$peaks_overlapping_mrna_genebody <- rowSums(genebody_peak_counts[,mrna_gene_ids])
+
+```
+
+# creating promoter peak occurence matrix
+# Peak_occurence_df
+This will make a matrix where promoters are cols (30K)
+Each will have 1 if overlapped by a given dbp : 0 if no overlaps
+
+```{r promoter peak occurence matrix}
+
+# running count_peaks_per_feature
+promoter_peak_occurence <- count_peaks_per_feature(lncrna_mrna_promoters, filtered_consensus_list, 
+type = "occurrence")
+
+
+# saving
+write.table(promoter_peak_occurence,"results/lncrna_mrna_promoter_peak_occurence_matrix.tsv")
+
+# Now let's use the 'data.frame()' fucntion. Set up a bunch of colnames and populate them.
+peak_occurence_df <- data.frame("gene_id" = colnames(promoter_peak_occurence),
+                                "gene_name" = lncrna_mrna_promoters$gene_name,
+                                "gene_type" = lncrna_mrna_promoters$gene_type,
+                                "chr" = lncrna_mrna_promoters@seqnames,   
+                                "1kb_up_tss_start" = lncrna_mrna_promoters@ranges@start,
+                                "strand" = lncrna_mrna_promoters@strand,
+                                "number_of_dbp" = colSums(promoter_peak_occurence))
+
+# saving
+write_csv(peak_occurence_df, "results/peak_occurence_dataframe.csv")
+#save(filtered_consensus_list, file = "results/filtered_consensus_list.RData")
+```
+
+```{r}
+# filter the num_peaks_df 
+# remove anything below 1000 peaks 
+filtered_consensus_list <- consensus_list[sapply(consensus_list, length) >= 1000]
+
+# saving 
+save(filtered_consensus_list, file = "results/filtered_consensus_list.RData")
+
+# keeping track of DBPs lost
+# 01_create_consensus_peaks.Rmd
+lost_dbps <- names(consensus_list[sapply(consensus_list, length) < 1000]) %>% as.data.frame()
+
+# saving 
+save(filtered_consensus_list, file = "/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/final_project/analysis/results/filtered_consensus_list.RData")
+write.table(lost_dbps, "/scratch/Shares/rinnclass/CLASS_2023/befo3150/CLASS_2023/Final_project/analysis/results/lost_dbps.csv")
+```
+# take the exported filtered consensus peaks 
+```{r}
+# do not re-run
+
+# for(i in 1:length(filtered_consensus_list)) {
+#   rtracklayer::export(filtered_consensus_list[[i]], 
+#                       paste0("results/consensus_peaks/", 
+#                              names(filtered_consensus_list)[i], 
+#                              "_consensus_peaks.bed"))
+# }
+
+# will be re-naming
+```
+# loading in genome features
+```{r}
+
+gencode_gr <- rtracklayer::import("/scratch/Shares/rinnclass/CLASS_2023/data/data/genomes/gencode.v32.annotation.gtf")
+
+# gencode genes
+gencode_genes <- gencode_gr[gencode_gr$type == "gene"] 
+
+# mrna_genes
+mrna_genes <- gencode_genes[gencode_genes$gene_type %in% "protein_coding"]
+
+# lncrna_genes
+lncrna_genes <- gencode_genes[gencode_genes$gene_type %in% "lncRNA"] 
+
+# mrna_lncrna_genes
+mrna_lncrna_genes <- gencode_genes[gencode_genes$gene_type %in% c("protein_coding","lncRNA")]
+
+# lncrna_mrna_promoters
+lncrna_mrna_promoters <- promoters(mrna_lncrna_genes, upstream = 1000, downstream = 1000)
+
+# lncrna_gene_ids
+lncrna_gene_ids <- mrna_lncrna_genes$gene_id[mrna_lncrna_genes$gene_type == "lncRNA"]
+
+# mrna_gene_ids
+mrna_gene_ids <-mrna_lncrna_genes$gene_id[mrna_lncrna_genes$gene_type == "protein_coding"]
+
+```
+
+# making data frame of filtered_consensus_peak info
+```{r creating num_peaks_df to track peak properties}
+
+num_peaks_df <- data.frame("dbp" = names(filtered_consensus_list),
+                           "num_peaks" = sapply(filtered_consensus_list, length))
+
+# total genome covered by peaks
+num_peaks_df$total_peak_length <- sapply(filtered_consensus_list, function(x) sum(width(x)))
+
+# creating number of promoter overlaps entry
+promoter_peak_counts <- count_peaks_per_feature(lncrna_mrna_promoters, filtered_consensus_list, type = "counts")
+
+# creating promoter peak_occurence for clustering - Metaplots later.
+promoter_peak_matrix <- count_peaks_per_feature(lncrna_mrna_promoters, filtered_consensus_list, type = "occurrence")
+
+# saving
+write.table(promoter_peak_matrix, "results/promoter_peak_occurrence_matrix.tsv")
+
+# read back in
+promoter_peak_occurrence_matrix <- read.table("results/promoter_peak_occurrence_matrix.tsv")
+
+# summing rows to get total number of promoter overlaps
+num_peaks_df$peaks_overlapping_promoters <- rowSums(promoter_peak_counts)
+
+# lncrna promoter overlaps 
+num_peaks_df$peaks_overlapping_lncrna_promoters <- rowSums(promoter_peak_counts[,lncrna_gene_ids])
+
+# mrna promoter overlaps
+num_peaks_df$peaks_overlapping_mrna_promoters <- rowSums(promoter_peak_counts[,mrna_gene_ids])
+
+# Finding overlaps with gene_bodies (will take a few minutes again)
+# Note this takes several minutes
+genebody_peak_counts <- count_peaks_per_feature(mrna_lncrna_genes, 
+                                                filtered_consensus_list, 
+                                                type = "counts")
+
+# All gene bodies overlaps
+num_peaks_df$peaks_overlapping_genebody <- rowSums(genebody_peak_counts)
+
+# lncRNA gene bodies 
+num_peaks_df$peaks_overlapping_lncrna_genebody <- rowSums(genebody_peak_counts[,lncrna_gene_ids])
+
+# mRNA gene bodies
+num_peaks_df$peaks_overlapping_mrna_genebody <- rowSums(genebody_peak_counts[,mrna_gene_ids])
+
+
+```
+
+# saving key env objects
+```{r saving objects for later}
+# no need to load peaks in as we have now saved the above functions within this file
+save(filtered_consensus_list, gencode_genes, lncrna_gene_ids, mrna_gene_ids, num_peaks_df, peak_occurence_df, promoter_peak_occurrence_matrix, lncrna_mrna_promoters, mrna_lncrna_genes, file = "results/peak_features.RData")
+```
+
+```{r}
+# How does peak number and genome coverage compare
+# use 02_plotting_2.Rmd
+# Let's plot our result of num_peaks versus genome coverage.
+# Let's plot our result of num_peaks versus genome coverage.
+ggplot(num_peaks_df, aes(x = num_peaks, y = total_peak_length)) +
+  geom_point() + 
+
+  ylab("BP covered") +
+  xlab("Number of peaks") +
+  ggtitle("Peak count vs. total bases covered")
+
+# saving MAKE SURE WORKING DIRECTORY IS 
+# /scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/CLASSES/final_project /analysis /results/figures
+ggsave("results/figures/peak_num_vs_coverage.pdf")
+```
+
+# What is the distribution of promoter overlaps versus gene-bodies (hint hist)
+```{r number of DBPS on promoters}
+
+ggplot(num_peaks_df, aes(x = peaks_overlapping_promoters)) +
+  geom_histogram() +
+  ylab("Gene-bodies") +
+  xlab("Number of peaks") +
+  ggtitle("Peak overlapping promoters v Gene-bodies")
+
+ggsave("results/figures/peak_num_vs_promoter_coverage.pdf")
+
+# The histogram shows the distribution of peaks to gene bodies. The promoter overlaps are less as the peak amounts increase.
+```
+
+
+# Analysis of genes that are "super binders" 
+```{r}
+# Use a histogram to find the distribution of the dbps to then make a list of super binding genes
+ggplot(peak_occurence_df, aes(x = number_of_dbp)) +
+geom_density(alpha = 0.2, color = "darkcyan", fill = "deeppink2") +
+  
+  theme_paperwhite() +
+  xlab(expression("Number of DBPs")) +
+  ylab(expression("Density")) +
+  ggtitle("Promoter binding events", subtitle = "mRNA and lncRNA genes") 
+
+# saving
+ggsave("results/figures/num_binding_events_per_promoter.pdf")
+
+#from the figure we can see super binders are present past the the 200 DBP mark meaning more proteins can be bound by these specific genes 
+```
+# list of super binders
+```{r}
+super_binders_list <- peak_occurence_df %>% 
+  filter(peak_occurence_df$number_of_dbp > 200)
+
+# create a data table for the super binders
+write_csv(super_binders_list, "results/super_binders_list.csv")
+
+# filter the data table by gene id to find the promoter region 
+promoter_super_binders <- super_binders_list$gene_id
+
+#promoter_super_binders is now a list of 11689 elments of super binder promoters 
+
+```
+
+# Is there a type of gene ontology associated with them versus the others?
+```{r}
+# These types of super binders have an association with gene products that are the result of mRNAs bound.
+
+```
+
+# Is there a difference in mRNA and lncRNA promoter overlaps?
+```{r}
+# create a new data frame 
+# use the pivot_longer function to turn the peaks_overlapping promoters of mRNA and lncrna under one peaks_overlapping_promoters from a wide to a long format under gene type 
+num_peaks_overlapping_promoters <- num_peaks_df %>%
+  dplyr::select(-peaks_overlapping_promoters) %>%
+  pivot_longer(cols = peaks_overlapping_lncrna_promoters:peaks_overlapping_mrna_promoters,
+               names_to = "gene_type",
+               values_to = "peaks_overlapping_promoters") %>%
+  mutate(gene_type = gsub("peaks_overlapping_", "", gene_type))
+
+# save the data table 
+write.table(num_peaks_overlapping_promoters, "results/figures/num_peaks_ocerlapping_promoters.csv")
+
+# plot the dataframe 
+ggplot(num_peaks_mRNA_lncRNA, aes(x = num_peaks, y = peaks_overlapping_promoters, 
+                         col = gene_type)) +
+         geom_point() +
+         geom_abline(slope = 1, linetype="solid") +
+  geom_smooth(method = "lm", se = FALSE, formula = "y ~ x") +
+  scale_color_manual(values = c("steelblue", "darkcyan"))+
+  xlab("Peaks per DBP") +
+  ylab("Peaks Overlapping Promoters") +
+  ggtitle("Number of DBP Peaks and Promoter Overlaps")
+
+ggsave("results/figures/peaks_overlapping_promoters_by_gene.pdf", height = 6, width = 5)
+
+# there is a difference in how lncmRNA can stablilize mRNA but also they encode for less transcripts than mRNA.
+
+```
+# Do lncRNAs also have super-binding promoters?
+```{r}
+# filter by gene type to obtain amount of super binding promoters related to lncRNAs
+lncRNA_super_binders_list <- super_binders_list %>% filter(gene_type=="lncRNA")
+nrow(lncRNA_super_binders_list) #2512 lncRNA_super_binders_list
+
+mRNA_super_binders_list <- super_binders_list %>% filter(gene_type=="protein_coding")
+nrow(mRNA_super_binders_list) #9177 mRNA_super_binders_list
+
+lncRNA_super_promoters= 2512/9177
+
+#lncRNA_super_promoters = 27.3%
+# yes they do have super promoters
+
+```
+
+# Results: I find that super-binders are more associated with mRNAs
+# Results: I found X,000 mRNA superbinding promoters and Y lncRNA super-promoters
+
+# Clustering 
+```{r}
+# establishing DF
+# Metaplots 1 and 2
+metaplot_df <- data.frame(x = integer(), dens = numeric(), dbp = character())
+
+# put the filtered consensus list by looping into the data frame
+for(i in 1:length(filtered_consensus_list)) {
+  tmp_df <- profile_tss(filtered_consensus_list[[i]], lncrna_mrna_promoters)
+  tmp_df$dbp <- names(filtered_consensus_list)[[i]]
+  metaplot_df <- bind_rows(metaplot_df, tmp_df)
+  
+}
+
+# saving
+write_rds(metaplot_df, "results/metaplot_df_final.rds")
+metaplot_df <- read_rds("results/metaplot_df_final.rds")
+
+```
+
+```{r}
+
+# What genes make sense to cluster together create an image (hint Pol II makes RNA)
+
+# Find a cluster of genes your interested in and can figure out what those genes do -- are there unknown genes i there too? If so maybe one could hypothesize they have a similar function to the known genes (Hint ZNFs)
+
+# if we cluster by lncRNA and mRNA separately what are some similarities and differences?
+
+# from the plots we seen that lncRNA and mRNA are different in that lncRNA have different areas of promoter regions than mRNA, whihc changes the spliting and interactions of the dendrograms. 
+
+#03_clustering.Rmd
+promoter_peak_occurence_matrix <- read.table("/scratch/Shares/rinnclass/CLASS_2023/akp_genomics/CLASS_2023/CLASSES/final_project /analysis /results/lncrna_mrna_promoter_peak_occurence_matrix.tsv")
+
+# Converting to a matrix format for correlation analysis
+promoter_peak_occurence_matrix <- as.matrix(promoter_peak_occurence_matrix)
+# Ok we see this is a very large matrix of 1 and 0 if a DBP is bound to a promoter.
+
+# caluclating the distance matrix 
+# Now let's create distance matrix for each pairwise vector comparison for the whole matrix now.
+
+# this will take somemtime to calculate, about 10 min as this is a distance matrix of 437 x 437
+peak_occurrence_dist <- dist(promoter_peak_occurence_matrix, method = "binary")
+#peak_occurrence_dist
+
+# clustering distance values
+bin_hier <- hclust(peak_occurrence_dist, method = "complete")
+
+# Dendrogram of binding profiles by promoter 
+ggdendro::ggdendrogram(bin_hier, rotate = FALSE,  size = 3,
+                       theme_dendro = TRUE) +
+   coord_flip() +
+   scale_y_continuous() +
+   scale_x_continuous(position = "top") +
+   scale_x_continuous(breaks = seq_along(bin_hier$labels[bin_hier$order]),
+             labels = bin_hier$labels[bin_hier$order], position = "top",
+             expand = c(0,0)) +
+   theme(axis.text.x = element_text(angle = 90, hjust  = 1)) +
+   theme(axis.text.y = element_text(angle = 0,hjust = 1)) +
+   scale_y_reverse(expand = c(0.01, 0)) +
+   theme(
+     plot.background = element_blank(),
+     panel.grid.major = element_blank(),
+   panel.grid.minor = element_blank(),
+     panel.border = element_blank()
+   )
+
+# Dendrograms for lncmRNA and mRNA
+# now we can split into lncRNA and mRNA
+lncrna_promoters <- lncrna_mrna_promoters[lncrna_mrna_promoters$gene_type == "lncRNA"]
+
+# mrna promoters
+
+mrna_promoters <- lncrna_mrna_promoters[lncrna_mrna_promoters$gene_type == "protein_coding"]
+
+# Now we will use index to separate peak_occurrence_matrix in lncRNA and mRNA
+lncrna_peak_occurence <- promoter_peak_occurence_matrix[,lncrna_promoters$gene_id]
+
+#combine the dist and hclust:
+bin_hier_lncrna <- hclust(dist(lncrna_peak_occurence, method = "binary"))
+
+# Now plot with ggdendro
+ggdendro::ggdendrogram(bin_hier_lncrna, rotate = T,  size = 3)
+ 
+# Now let's save this figure
+ggsave("results/figures/lncrna_hclust_binary_dist.pdf", height = 49, width = 6)
+
+# mRNA promter ggdendro
+
+mrna_peak_occurence <- promoter_peak_occurence_matrix[,mrna_promoters$gene_id]
+
+# getting the distance matrix for only mRNA promoters  
+bin_hier_mrna <- hclust(dist(mrna_peak_occurence, method = "binary"))
+ 
+# plotting with ggdendro
+ggdendro::ggdendrogram(bin_hier, rotate = TRUE,  size = 3)
+
+#same as the lncrna properties between them 
+
+# saving
+ggsave("results/figures/mrna_hclust_binary_dist.pdf", height = 44, width = 6)
+```
+
+# Result: ZNFX seems to be similar to geneY and I hypothesize it might involved in A
+
+# Metaplots
+```{r}
+
+# Let's look at the metaplot for all DBPs on lncRNA and mRNA promoters seperately (hint facet wrap).
+
+# Which genes seem to have a difference in where they bind on promoters between lncRNA and mRNA promoters
+
+
+# Make a metaplot of DBPS only on Super-binders versus regular promoters ...
+```
+
+
+# RNAseq expression
+
+```{r}
+
+# What is the relationship between number of DBPS bound on a promoter versus RNA output (hint TPM)
+
+# Let's make a heatmap of genes that are variable across samples 
+
+# Which subfraction of the cell has the highest expression.
+
+# Let's make a heatmap of nuclear versus cytoplasmic expression
+
+# How many lncRNA and mRNA genes are sig in nuclear or cyto
+
+# What is/are the most nuclear mRNA(s) -- is there a type of gene ontology associated with them?
+
+# If we zoom in on high binding promoters (> 200 DBPs) are there any that don't have any expression?
+
+```
+# Result in file.csv I have all the super binders that don't express RNA
+
